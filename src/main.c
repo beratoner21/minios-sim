@@ -11,6 +11,8 @@ typedef struct {
     int priority;
     int *bursts;
     size_t burst_count;
+    size_t current_burst;
+    long long ready_at;
 } Process;
 
 static int read_number(const char *text, int minimum, int *result)
@@ -68,6 +70,53 @@ static int parse_process(char *line, Process *process)
     return process->burst_count % 2 == 1;
 }
 
+static void run_fcfs(Process *processes, size_t count)
+{
+    long long now = 0;
+    size_t finished = 0;
+
+    for (size_t i = 0; i < count; i++) {
+        processes[i].ready_at = processes[i].arrival;
+    }
+
+    while (finished < count) {
+        Process *next = NULL;
+
+        for (size_t i = 0; i < count; i++) {
+            Process *p = &processes[i];
+            if (p->current_burst == p->burst_count) {
+                continue;
+            }
+
+            if (next == NULL || p->ready_at < next->ready_at ||
+                (p->ready_at == next->ready_at && strcmp(p->pid, next->pid) < 0)) {
+                next = p;
+            }
+        }
+
+        /* If even the earliest process is not ready yet, the CPU is idle. */
+        if (now < next->ready_at) {
+            printf("| IDLE %lld-%lld ", now, next->ready_at);
+            now = next->ready_at;
+        }
+
+        long long end = now + next->bursts[next->current_burst];
+        printf("| %s %lld-%lld ", next->pid, now, end);
+        now = end;
+        next->current_burst++;
+
+        if (next->current_burst == next->burst_count) {
+            finished++;
+        } else {
+            int io_duration = next->bursts[next->current_burst];
+            next->ready_at = now + io_duration;
+            next->current_burst++;
+        }
+    }
+
+    puts("|");
+}
+
 int main(int argc, char *argv[])
 {
     if (argc != 5 || strcmp(argv[1], "sched") != 0 ||
@@ -123,24 +172,7 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    if (count == 1 && processes[0].burst_count == 1) {
-        const Process *p = &processes[0];
-        long long finish = (long long)p->arrival + p->bursts[0];
-        if (p->arrival > 0) {
-            printf("| IDLE 0-%d ", p->arrival);
-        }
-        printf("| %s %d-%lld |\n", p->pid, p->arrival, finish);
-    } else {
-        /* Show the parsed workload until the FCFS simulation is connected. */
-        for (size_t i = 0; i < count; i++) {
-            const Process *p = &processes[i];
-            printf("%s bursts:", p->pid);
-            for (size_t j = 0; j < p->burst_count; j++) {
-                printf(" %d", p->bursts[j]);
-            }
-            putchar('\n');
-        }
-    }
+    run_fcfs(processes, count);
     status = 0;
 
 cleanup:
