@@ -80,7 +80,33 @@ static int compare_pid(const void *left, const void *right)
     return strcmp(a->pid, b->pid);
 }
 
-static void run_fcfs(Process *processes, size_t count, int csv)
+typedef enum { FCFS, SJF } Policy;
+
+static int comes_first(const Process *a, const Process *b,
+                       long long now, Policy policy)
+{
+    int a_ready = a->ready_at <= now;
+    int b_ready = b->ready_at <= now;
+
+    if (a_ready != b_ready) {
+        return a_ready;
+    }
+
+    if (a_ready && policy == SJF) {
+        int a_cpu = a->bursts[a->current_burst];
+        int b_cpu = b->bursts[b->current_burst];
+        if (a_cpu != b_cpu) {
+            return a_cpu < b_cpu;
+        }
+    }
+
+    if (a->ready_at != b->ready_at) {
+        return a->ready_at < b->ready_at;
+    }
+    return strcmp(a->pid, b->pid) < 0;
+}
+
+static void run_schedule(Process *processes, size_t count, int csv, Policy policy)
 {
     long long now = 0;
     size_t finished = 0;
@@ -98,8 +124,7 @@ static void run_fcfs(Process *processes, size_t count, int csv)
                 continue;
             }
 
-            if (next == NULL || p->ready_at < next->ready_at ||
-                (p->ready_at == next->ready_at && strcmp(p->pid, next->pid) < 0)) {
+            if (next == NULL || comes_first(p, next, now, policy)) {
                 next = p;
             }
         }
@@ -110,6 +135,7 @@ static void run_fcfs(Process *processes, size_t count, int csv)
                 printf("| IDLE %lld-%lld ", now, next->ready_at);
             }
             now = next->ready_at;
+            continue;
         }
 
         next->waiting += now - next->ready_at;
@@ -153,8 +179,8 @@ int main(int argc, char *argv[])
 {
     int csv = argc == 6 && strcmp(argv[4], "--csv") == 0;
     if ((argc != 5 && !csv) || strcmp(argv[1], "sched") != 0 ||
-        strcmp(argv[2], "-a") != 0 || strcmp(argv[3], "fcfs") != 0) {
-        fprintf(stderr, "Usage: ./minios sched -a fcfs [--csv] FILE\n");
+        strcmp(argv[2], "-a") != 0 || (strcmp(argv[3], "fcfs") != 0 && strcmp(argv[3], "sjf") != 0)) {
+        fprintf(stderr, "Usage: ./minios sched -a fcfs|sjf [--csv] FILE\n");
         return 1;
     }
 
@@ -206,7 +232,8 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    run_fcfs(processes, count, csv);
+    Policy policy = strcmp(argv[3], "sjf") == 0 ? SJF : FCFS;
+    run_schedule(processes, count, csv, policy);
     status = 0;
 
 cleanup:
