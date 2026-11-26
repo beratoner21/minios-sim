@@ -13,6 +13,9 @@ typedef struct {
     size_t burst_count;
     size_t current_burst;
     long long ready_at;
+    long long completion;
+    long long waiting;
+    long long response;
 } Process;
 
 static int read_number(const char *text, int minimum, int *result)
@@ -70,7 +73,14 @@ static int parse_process(char *line, Process *process)
     return process->burst_count % 2 == 1;
 }
 
-static void run_fcfs(Process *processes, size_t count)
+static int compare_pid(const void *left, const void *right)
+{
+    const Process *a = left;
+    const Process *b = right;
+    return strcmp(a->pid, b->pid);
+}
+
+static void run_fcfs(Process *processes, size_t count, int csv)
 {
     long long now = 0;
     size_t finished = 0;
@@ -96,16 +106,26 @@ static void run_fcfs(Process *processes, size_t count)
 
         /* If even the earliest process is not ready yet, the CPU is idle. */
         if (now < next->ready_at) {
-            printf("| IDLE %lld-%lld ", now, next->ready_at);
+            if (!csv) {
+                printf("| IDLE %lld-%lld ", now, next->ready_at);
+            }
             now = next->ready_at;
         }
 
+        next->waiting += now - next->ready_at;
+        if (next->current_burst == 0) {
+            next->response = now - next->arrival;
+        }
+
         long long end = now + next->bursts[next->current_burst];
-        printf("| %s %lld-%lld ", next->pid, now, end);
+        if (!csv) {
+            printf("| %s %lld-%lld ", next->pid, now, end);
+        }
         now = end;
         next->current_burst++;
 
         if (next->current_burst == next->burst_count) {
+            next->completion = now;
             finished++;
         } else {
             int io_duration = next->bursts[next->current_burst];
@@ -114,20 +134,34 @@ static void run_fcfs(Process *processes, size_t count)
         }
     }
 
-    puts("|");
+    if (!csv) {
+        puts("|");
+        return;
+    }
+
+    qsort(processes, count, sizeof *processes, compare_pid);
+    puts("pid,arrival,completion,turnaround,waiting,response");
+    for (size_t i = 0; i < count; i++) {
+        const Process *p = &processes[i];
+        printf("%s,%d,%lld,%lld,%lld,%lld\n",
+               p->pid, p->arrival, p->completion,
+               p->completion - p->arrival, p->waiting, p->response);
+    }
 }
 
 int main(int argc, char *argv[])
 {
-    if (argc != 5 || strcmp(argv[1], "sched") != 0 ||
+    int csv = argc == 6 && strcmp(argv[4], "--csv") == 0;
+    if ((argc != 5 && !csv) || strcmp(argv[1], "sched") != 0 ||
         strcmp(argv[2], "-a") != 0 || strcmp(argv[3], "fcfs") != 0) {
-        fprintf(stderr, "Usage: ./minios sched -a fcfs FILE\n");
+        fprintf(stderr, "Usage: ./minios sched -a fcfs [--csv] FILE\n");
         return 1;
     }
 
-    FILE *input = fopen(argv[4], "r");
+    const char *filename = argv[argc - 1];
+    FILE *input = fopen(filename, "r");
     if (input == NULL) {
-        perror(argv[4]);
+        perror(filename);
         return 1;
     }
 
@@ -172,7 +206,7 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    run_fcfs(processes, count);
+    run_fcfs(processes, count, csv);
     status = 0;
 
 cleanup:
