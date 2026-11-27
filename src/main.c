@@ -14,6 +14,7 @@ typedef struct {
     size_t current_burst;
     long long ready_at;
     int remaining;
+    int quantum_expired;
     long long completion;
     long long waiting;
     long long response;
@@ -81,7 +82,7 @@ static int compare_pid(const void *left, const void *right)
     return strcmp(a->pid, b->pid);
 }
 
-typedef enum { FCFS, SJF, SRTF, PRIO } Policy;
+typedef enum { FCFS, SJF, SRTF, PRIO, RR } Policy;
 
 static int effective_priority(const Process *p, long long waited, int aging)
 {
@@ -117,6 +118,10 @@ static int comes_first(const Process *a, const Process *b,
 
     if (a->ready_at != b->ready_at) {
         return a->ready_at < b->ready_at;
+    }
+    /* Same-tick arrivals and I/O returns precede the expired runner. */
+    if (policy == RR && a->quantum_expired != b->quantum_expired) {
+        return !a->quantum_expired;
     }
     return strcmp(a->pid, b->pid) < 0;
 }
@@ -159,7 +164,7 @@ static long long preemption_end(const Process *processes, size_t count,
     return end;
 }
 
-static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging)
+static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging, int quantum)
 {
     long long now = 0;
     size_t finished = 0;
@@ -193,13 +198,17 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
             continue;
         }
 
+        next->quantum_expired = 0;
         next->waiting += now - next->ready_at;
         if (next->response < 0) {
             next->response = now - next->arrival;
         }
 
         long long end = now + next->remaining;
-        if (policy == SRTF || policy == PRIO) {
+        if (policy == RR && next->remaining > quantum) {
+            end = now + quantum;
+            next->quantum_expired = 1;
+        } else if (policy == SRTF || policy == PRIO) {
             end = preemption_end(processes, count, next, now, policy, aging);
         }
         if (!csv) {
@@ -243,15 +252,20 @@ int main(int argc, char *argv[])
 {
     int csv = 0;
     int aging = 0;
+    int quantum = 0;
     if (argc < 5 || strcmp(argv[1], "sched") != 0 || strcmp(argv[2], "-a") != 0 ||
         (strcmp(argv[3], "fcfs") && strcmp(argv[3], "sjf") &&
-         strcmp(argv[3], "srtf") && strcmp(argv[3], "prio"))) {
-        fprintf(stderr, "Usage: ./minios sched -a POLICY [--aging N] [--csv] FILE\n");
+         strcmp(argv[3], "srtf") && strcmp(argv[3], "prio") && strcmp(argv[3], "rr"))) {
+        fprintf(stderr, "Usage: ./minios sched -a POLICY [-q QUANTUM] [--aging N] [--csv] FILE\n");
         return 1;
     }
     for (int i = 4; i < argc - 1; i++) {
         if (strcmp(argv[i], "--csv") == 0 && !csv) {
             csv = 1;
+        } else if (strcmp(argv[i], "-q") == 0 && !quantum &&
+                   strcmp(argv[3], "rr") == 0 && i + 1 < argc - 1 &&
+                   read_number(argv[i + 1], 1, &quantum)) {
+            i++;
         } else if (strcmp(argv[i], "--aging") == 0 && !aging &&
                    strcmp(argv[3], "prio") == 0 && i + 1 < argc - 1 &&
                    read_number(argv[i + 1], 1, &aging)) {
@@ -315,8 +329,10 @@ int main(int argc, char *argv[])
         policy = SRTF;
     } else if (strcmp(argv[3], "prio") == 0) {
         policy = PRIO;
+    } else if (strcmp(argv[3], "rr") == 0) {
+        policy = RR;
     }
-    run_schedule(processes, count, csv, policy, aging);
+    run_schedule(processes, count, csv, policy, aging, quantum ? quantum : 4);
     status = 0;
 
 cleanup:
