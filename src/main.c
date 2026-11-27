@@ -81,7 +81,7 @@ static int compare_pid(const void *left, const void *right)
     return strcmp(a->pid, b->pid);
 }
 
-typedef enum { FCFS, SJF, SRTF } Policy;
+typedef enum { FCFS, SJF, SRTF, PRIO } Policy;
 
 static int comes_first(const Process *a, const Process *b,
                        long long now, Policy policy)
@@ -93,7 +93,11 @@ static int comes_first(const Process *a, const Process *b,
         return a_ready;
     }
 
-    if (a_ready && policy != FCFS) {
+    if (a_ready && policy == PRIO && a->priority != b->priority) {
+        return a->priority < b->priority;
+    }
+
+    if (a_ready && (policy == SJF || policy == SRTF)) {
         int a_cpu = a->remaining;
         int b_cpu = b->remaining;
         if (a_cpu != b_cpu) {
@@ -107,9 +111,9 @@ static int comes_first(const Process *a, const Process *b,
     return strcmp(a->pid, b->pid) < 0;
 }
 
-/* A new arrival or I/O return can preempt only with strictly less work. */
-static long long srtf_end(const Process *processes, size_t count,
-                          const Process *running, long long now)
+/* Find the first arrival or I/O return that outranks the running process. */
+static long long preemption_end(const Process *processes, size_t count,
+                          const Process *running, long long now, Policy policy)
 {
     long long finish = now + running->remaining;
     long long end = finish;
@@ -119,7 +123,9 @@ static long long srtf_end(const Process *processes, size_t count,
             p->ready_at <= now || p->ready_at >= end) {
             continue;
         }
-        if (p->remaining < finish - p->ready_at) {
+        int preempts = policy == PRIO ? p->priority < running->priority
+                                      : p->remaining < finish - p->ready_at;
+        if (preempts) {
             end = p->ready_at;
         }
     }
@@ -166,8 +172,8 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         }
 
         long long end = now + next->remaining;
-        if (policy == SRTF) {
-            end = srtf_end(processes, count, next, now);
+        if (policy == SRTF || policy == PRIO) {
+            end = preemption_end(processes, count, next, now, policy);
         }
         if (!csv) {
             printf("| %s %lld-%lld ", next->pid, now, end);
@@ -211,8 +217,8 @@ int main(int argc, char *argv[])
     int csv = argc == 6 && strcmp(argv[4], "--csv") == 0;
     if ((argc != 5 && !csv) || strcmp(argv[1], "sched") != 0 ||
         strcmp(argv[2], "-a") != 0 || (strcmp(argv[3], "fcfs") != 0 && strcmp(argv[3], "sjf") != 0 &&
-                                       strcmp(argv[3], "srtf") != 0)) {
-        fprintf(stderr, "Usage: ./minios sched -a fcfs|sjf|srtf [--csv] FILE\n");
+                                       strcmp(argv[3], "srtf") != 0 && strcmp(argv[3], "prio") != 0)) {
+        fprintf(stderr, "Usage: ./minios sched -a fcfs|sjf|srtf|prio [--csv] FILE\n");
         return 1;
     }
 
@@ -267,6 +273,8 @@ int main(int argc, char *argv[])
     Policy policy = strcmp(argv[3], "sjf") == 0 ? SJF : FCFS;
     if (strcmp(argv[3], "srtf") == 0) {
         policy = SRTF;
+    } else if (strcmp(argv[3], "prio") == 0) {
+        policy = PRIO;
     }
     run_schedule(processes, count, csv, policy);
     status = 0;
