@@ -83,8 +83,14 @@ static int compare_pid(const void *left, const void *right)
 
 typedef enum { FCFS, SJF, SRTF, PRIO } Policy;
 
+static int effective_priority(const Process *p, long long waited, int aging)
+{
+    long long levels = aging ? waited / aging : 0;
+    return levels >= p->priority ? 0 : p->priority - (int)levels;
+}
+
 static int comes_first(const Process *a, const Process *b,
-                       long long now, Policy policy)
+                       long long now, Policy policy, int aging)
 {
     int a_ready = a->ready_at <= now;
     int b_ready = b->ready_at <= now;
@@ -93,8 +99,12 @@ static int comes_first(const Process *a, const Process *b,
         return a_ready;
     }
 
-    if (a_ready && policy == PRIO && a->priority != b->priority) {
-        return a->priority < b->priority;
+    if (a_ready && policy == PRIO) {
+        int pa = effective_priority(a, a->waiting + (now - a->ready_at), aging);
+        int pb = effective_priority(b, b->waiting + (now - b->ready_at), aging);
+        if (pa != pb) {
+            return pa < pb;
+        }
     }
 
     if (a_ready && (policy == SJF || policy == SRTF)) {
@@ -111,28 +121,45 @@ static int comes_first(const Process *a, const Process *b,
     return strcmp(a->pid, b->pid) < 0;
 }
 
-/* Find the first arrival or I/O return that outranks the running process. */
 static long long preemption_end(const Process *processes, size_t count,
-                          const Process *running, long long now, Policy policy)
+                                const Process *running, long long now,
+                                Policy policy, int aging)
 {
     long long finish = now + running->remaining;
     long long end = finish;
+    int rank = effective_priority(running, running->waiting, aging);
+
     for (size_t i = 0; i < count; i++) {
         const Process *p = &processes[i];
-        if (p->current_burst == p->burst_count ||
-            p->ready_at <= now || p->ready_at >= end) {
+        if (p == running || p->current_burst == p->burst_count || p->ready_at >= end) {
             continue;
         }
-        int preempts = policy == PRIO ? p->priority < running->priority
-                                      : p->remaining < finish - p->ready_at;
-        if (preempts) {
-            end = p->ready_at;
+
+        long long at = p->ready_at;
+        if (policy == SRTF) {
+            if (at <= now || p->remaining >= finish - at) {
+                continue;
+            }
+        } else if (effective_priority(p, p->waiting, aging) >= rank) {
+            if (!aging || rank == 0) {
+                continue;
+            }
+            /* First tick at which this process strictly outranks the runner. */
+            long long required_wait = ((long long)p->priority - rank + 1) * aging;
+            long long delay = required_wait - p->waiting;
+            if (delay >= end - at) {
+                continue;
+            }
+            at += delay;
+        }
+        if (at > now && at < end) {
+            end = at;
         }
     }
     return end;
 }
 
-static void run_schedule(Process *processes, size_t count, int csv, Policy policy)
+static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging)
 {
     long long now = 0;
     size_t finished = 0;
@@ -152,7 +179,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
                 continue;
             }
 
-            if (next == NULL || comes_first(p, next, now, policy)) {
+            if (next == NULL || comes_first(p, next, now, policy, aging)) {
                 next = p;
             }
         }
@@ -173,7 +200,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
 
         long long end = now + next->remaining;
         if (policy == SRTF || policy == PRIO) {
-            end = preemption_end(processes, count, next, now, policy);
+            end = preemption_end(processes, count, next, now, policy, aging);
         }
         if (!csv) {
             printf("| %s %lld-%lld ", next->pid, now, end);
@@ -214,12 +241,25 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
 
 int main(int argc, char *argv[])
 {
-    int csv = argc == 6 && strcmp(argv[4], "--csv") == 0;
-    if ((argc != 5 && !csv) || strcmp(argv[1], "sched") != 0 ||
-        strcmp(argv[2], "-a") != 0 || (strcmp(argv[3], "fcfs") != 0 && strcmp(argv[3], "sjf") != 0 &&
-                                       strcmp(argv[3], "srtf") != 0 && strcmp(argv[3], "prio") != 0)) {
-        fprintf(stderr, "Usage: ./minios sched -a fcfs|sjf|srtf|prio [--csv] FILE\n");
+    int csv = 0;
+    int aging = 0;
+    if (argc < 5 || strcmp(argv[1], "sched") != 0 || strcmp(argv[2], "-a") != 0 ||
+        (strcmp(argv[3], "fcfs") && strcmp(argv[3], "sjf") &&
+         strcmp(argv[3], "srtf") && strcmp(argv[3], "prio"))) {
+        fprintf(stderr, "Usage: ./minios sched -a POLICY [--aging N] [--csv] FILE\n");
         return 1;
+    }
+    for (int i = 4; i < argc - 1; i++) {
+        if (strcmp(argv[i], "--csv") == 0 && !csv) {
+            csv = 1;
+        } else if (strcmp(argv[i], "--aging") == 0 && !aging &&
+                   strcmp(argv[3], "prio") == 0 && i + 1 < argc - 1 &&
+                   read_number(argv[i + 1], 1, &aging)) {
+            i++;
+        } else {
+            fprintf(stderr, "Invalid scheduler option\n");
+            return 1;
+        }
     }
 
     const char *filename = argv[argc - 1];
@@ -276,7 +316,7 @@ int main(int argc, char *argv[])
     } else if (strcmp(argv[3], "prio") == 0) {
         policy = PRIO;
     }
-    run_schedule(processes, count, csv, policy);
+    run_schedule(processes, count, csv, policy, aging);
     status = 0;
 
 cleanup:
