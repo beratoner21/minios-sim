@@ -13,6 +13,7 @@ typedef struct {
     size_t burst_count;
     size_t current_burst;
     long long ready_at;
+    int remaining;
     long long completion;
     long long waiting;
     long long response;
@@ -80,7 +81,7 @@ static int compare_pid(const void *left, const void *right)
     return strcmp(a->pid, b->pid);
 }
 
-typedef enum { FCFS, SJF } Policy;
+typedef enum { FCFS, SJF, SRTF } Policy;
 
 static int comes_first(const Process *a, const Process *b,
                        long long now, Policy policy)
@@ -92,9 +93,9 @@ static int comes_first(const Process *a, const Process *b,
         return a_ready;
     }
 
-    if (a_ready && policy == SJF) {
-        int a_cpu = a->bursts[a->current_burst];
-        int b_cpu = b->bursts[b->current_burst];
+    if (a_ready && policy != FCFS) {
+        int a_cpu = a->remaining;
+        int b_cpu = b->remaining;
         if (a_cpu != b_cpu) {
             return a_cpu < b_cpu;
         }
@@ -106,6 +107,25 @@ static int comes_first(const Process *a, const Process *b,
     return strcmp(a->pid, b->pid) < 0;
 }
 
+/* A new arrival or I/O return can preempt only with strictly less work. */
+static long long srtf_end(const Process *processes, size_t count,
+                          const Process *running, long long now)
+{
+    long long finish = now + running->remaining;
+    long long end = finish;
+    for (size_t i = 0; i < count; i++) {
+        const Process *p = &processes[i];
+        if (p->current_burst == p->burst_count ||
+            p->ready_at <= now || p->ready_at >= end) {
+            continue;
+        }
+        if (p->remaining < finish - p->ready_at) {
+            end = p->ready_at;
+        }
+    }
+    return end;
+}
+
 static void run_schedule(Process *processes, size_t count, int csv, Policy policy)
 {
     long long now = 0;
@@ -113,6 +133,8 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
 
     for (size_t i = 0; i < count; i++) {
         processes[i].ready_at = processes[i].arrival;
+        processes[i].remaining = processes[i].bursts[0];
+        processes[i].response = -1;
     }
 
     while (finished < count) {
@@ -139,15 +161,23 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         }
 
         next->waiting += now - next->ready_at;
-        if (next->current_burst == 0) {
+        if (next->response < 0) {
             next->response = now - next->arrival;
         }
 
-        long long end = now + next->bursts[next->current_burst];
+        long long end = now + next->remaining;
+        if (policy == SRTF) {
+            end = srtf_end(processes, count, next, now);
+        }
         if (!csv) {
             printf("| %s %lld-%lld ", next->pid, now, end);
         }
+        next->remaining -= (int)(end - now);
         now = end;
+        if (next->remaining > 0) {
+            next->ready_at = now;
+            continue;
+        }
         next->current_burst++;
 
         if (next->current_burst == next->burst_count) {
@@ -157,6 +187,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
             int io_duration = next->bursts[next->current_burst];
             next->ready_at = now + io_duration;
             next->current_burst++;
+            next->remaining = next->bursts[next->current_burst];
         }
     }
 
@@ -179,8 +210,9 @@ int main(int argc, char *argv[])
 {
     int csv = argc == 6 && strcmp(argv[4], "--csv") == 0;
     if ((argc != 5 && !csv) || strcmp(argv[1], "sched") != 0 ||
-        strcmp(argv[2], "-a") != 0 || (strcmp(argv[3], "fcfs") != 0 && strcmp(argv[3], "sjf") != 0)) {
-        fprintf(stderr, "Usage: ./minios sched -a fcfs|sjf [--csv] FILE\n");
+        strcmp(argv[2], "-a") != 0 || (strcmp(argv[3], "fcfs") != 0 && strcmp(argv[3], "sjf") != 0 &&
+                                       strcmp(argv[3], "srtf") != 0)) {
+        fprintf(stderr, "Usage: ./minios sched -a fcfs|sjf|srtf [--csv] FILE\n");
         return 1;
     }
 
@@ -233,6 +265,9 @@ int main(int argc, char *argv[])
     }
 
     Policy policy = strcmp(argv[3], "sjf") == 0 ? SJF : FCFS;
+    if (strcmp(argv[3], "srtf") == 0) {
+        policy = SRTF;
+    }
     run_schedule(processes, count, csv, policy);
     status = 0;
 
