@@ -1,35 +1,49 @@
 # MiniOS-Sim
 
 MiniOS-Sim is a C11 command-line operating systems simulator for CEN 302.
-The first milestone focuses on CPU scheduling. Later milestones cover thread
-synchronization, deadlock handling, and memory management.
+Milestone 1 implements CPU scheduling with a simulated clock, independent I/O
+waits, and five scheduling policies.
 
-## Build and run
+## Build and test
 
-From the project directory on Ubuntu 24.04, run:
+On Ubuntu 24.04, run the following from the repository root. The simulator
+builds with GCC and GNU Make. The test runner uses Python 3's standard library.
 
 ```bash
 make
-./minios
+make test
 ```
 
-The current executable prints `MiniOS-Sim ready`.
+The suite compares the simulator's output against the reference files in
+`tests/`. It prints PASS or FAIL for each case and exits with an error if a case fails.
 
-## First scheduling example
+## Run a workload
 
-The input file `tests/sched-one.txt` contains one process:
+Each non-comment row contains a PID, arrival time, priority, and an alternating
+list of CPU and I/O durations. The first and last durations are CPU bursts.
+Lines beginning with `#` are comments. Smaller priority values rank higher.
 
-```text
-P1 0 3 2
+```bash
+./minios sched -a fcfs tests/sched-io.txt
+./minios sched -a sjf tests/sched-sjf.txt
+./minios sched -a srtf tests/sched-srtf.txt
+./minios sched -a prio --aging 2 tests/sched-aging.txt
+./minios sched -a rr -q 2 tests/sched-rr-worked.txt
 ```
 
-Process P1 arrives at tick 0 with priority 3 and needs 2 ticks of CPU time.
-Under first-come, first-served (FCFS) scheduling, it should run from tick 0
-to tick 2 with no waiting time. This is the first expected result to check
-when the scheduler is implemented.
+The default output includes the Gantt chart, a per-process timing table, and
+summary statistics. Round Robin defaults to a four-tick quantum.
 
-## M1 scope
+## Inspect and compare
 
-- Implement FCFS, SJF, SRTF, preemptive priority with aging, and round robin.
-- Produce Gantt charts, scheduling metrics, transition traces, and CSV output.
-- Compare all five policies on the same workload and verify at least four tests.
+```bash
+./minios sched -a fcfs --trace tests/sched-io.txt
+./minios sched -a fcfs --csv tests/sched-io.txt
+./minios sched -a fcfs -c 1 tests/sched-switch.txt
+./minios sched --compare -q 2 tests/sched-rr-worked.txt
+```
+
+Trace output records process state transitions. CSV output contains a header
+and PID-sorted rows. A switch cost of one adds one idle tick on a direct
+change between processes. Comparison mode runs all five policies on the same
+workload and prints their aggregate metrics side by side.
