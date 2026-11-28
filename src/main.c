@@ -199,10 +199,12 @@ static void admit_until(FILE *trace, Process *processes, size_t count, long long
     }
 }
 
-static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging, int quantum, FILE *trace)
+static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging, int quantum, int switch_cost, FILE *trace)
 {
     long long now = 0;
     size_t finished = 0;
+    const Process *previous = NULL;
+    long long switches = 0;
 
     for (size_t i = 0; i < count; i++) {
         processes[i].state = NEW;
@@ -234,10 +236,24 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
             if (!csv && !trace) {
                 printf("| IDLE %lld-%lld ", now, next->ready_at);
             }
+            previous = NULL;
             now = next->ready_at;
             continue;
         }
 
+        if (previous && previous != next) {
+            switches++;
+            if (switch_cost > 0) {
+                if (!csv && !trace) {
+                    printf("| IDLE %lld-%lld ", now, now + switch_cost);
+                }
+                now += switch_cost;
+                /* The dispatch decision uses all arrivals during the delay. */
+                previous = NULL;
+                continue;
+            }
+        }
+        previous = next;
         transition(trace, next, RUNNING, now);
         next->quantum_expired = 0;
         next->waiting += now - next->ready_at;
@@ -280,6 +296,9 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
 
     if (!csv && !trace) {
         puts("|");
+        if (switch_cost >= 0) {
+            printf("Context switches: %lld\n", switches);
+        }
         return;
     }
 
@@ -302,15 +321,19 @@ int main(int argc, char *argv[])
     int show_trace = 0;
     int aging = 0;
     int quantum = 0;
+    int switch_cost = -1;
     if (argc < 5 || strcmp(argv[1], "sched") != 0 || strcmp(argv[2], "-a") != 0 ||
         (strcmp(argv[3], "fcfs") && strcmp(argv[3], "sjf") &&
          strcmp(argv[3], "srtf") && strcmp(argv[3], "prio") && strcmp(argv[3], "rr"))) {
-        fprintf(stderr, "Usage: ./minios sched -a POLICY [-q QUANTUM] [--aging N] [--trace] [--csv] FILE\n");
+        fprintf(stderr, "Usage: ./minios sched -a POLICY [-q QUANTUM] [-c COST] [--aging N] [--trace] [--csv] FILE\n");
         return 1;
     }
     for (int i = 4; i < argc - 1; i++) {
         if (strcmp(argv[i], "--csv") == 0 && !csv) {
             csv = 1;
+        } else if (strcmp(argv[i], "-c") == 0 && switch_cost < 0 &&
+                   i + 1 < argc - 1 && read_number(argv[i + 1], 0, &switch_cost)) {
+            i++;
         } else if (strcmp(argv[i], "--trace") == 0 && !show_trace) {
             show_trace = 1;
         } else if (strcmp(argv[i], "-q") == 0 && !quantum &&
@@ -384,9 +407,9 @@ int main(int argc, char *argv[])
         policy = RR;
     }
     if (show_trace && !csv) {
-        run_schedule(processes, count, 0, policy, aging, quantum ? quantum : 4, stdout);
+        run_schedule(processes, count, 0, policy, aging, quantum ? quantum : 4, switch_cost, stdout);
     }
-    run_schedule(processes, count, csv, policy, aging, quantum ? quantum : 4, NULL);
+    run_schedule(processes, count, csv, policy, aging, quantum ? quantum : 4, switch_cost, NULL);
     status = 0;
 
 cleanup:
