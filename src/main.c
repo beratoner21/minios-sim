@@ -85,7 +85,9 @@ static int compare_pid(const void *left, const void *right)
     return strcmp(a->pid, b->pid);
 }
 
-typedef enum { FCFS, SJF, SRTF, PRIO, RR } Policy;
+typedef enum { FCFS, SJF, SRTF, PRIO, RR, POLICY_COUNT } Policy;
+static const char *const policy_names[POLICY_COUNT] = {"fcfs", "sjf", "srtf", "prio", "rr"};
+typedef enum { NORMAL, CSV, COMPARISON } OutputMode;
 
 static int effective_priority(const Process *p, long long waited, int aging)
 {
@@ -199,7 +201,7 @@ static void admit_until(FILE *trace, Process *processes, size_t count, long long
     }
 }
 
-static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging, int quantum, int switch_cost, FILE *trace)
+static void run_schedule(Process *processes, size_t count, OutputMode mode, Policy policy, int aging, int quantum, int switch_cost, FILE *trace)
 {
     long long now = 0;
     size_t finished = 0;
@@ -234,7 +236,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
 
         /* If even the earliest process is not ready yet, the CPU is idle. */
         if (now < next->ready_at) {
-            if (!csv && !trace) {
+            if (mode == NORMAL && !trace) {
                 printf("| IDLE %lld-%lld ", now, next->ready_at);
             }
             previous = NULL;
@@ -245,7 +247,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         if (previous && previous != next) {
             switches++;
             if (switch_cost > 0) {
-                if (!csv && !trace) {
+                if (mode == NORMAL && !trace) {
                     printf("| IDLE %lld-%lld ", now, now + switch_cost);
                 }
                 now += switch_cost;
@@ -269,7 +271,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         } else if (policy == SRTF || policy == PRIO) {
             end = preemption_end(processes, count, next, now, policy, aging);
         }
-        if (!csv && !trace) {
+        if (mode == NORMAL && !trace) {
             printf("| %s %lld-%lld ", next->pid, now, end);
         }
         busy += end - now;
@@ -299,27 +301,39 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
     if (trace) {
         return;
     }
-    if (!csv) {
+    if (mode == NORMAL) {
         puts("|");
     }
-    qsort(processes, count, sizeof *processes, compare_pid);
-    puts(csv ? "pid,arrival,completion,turnaround,waiting,response"
-             : "PID Arrival Completion Turnaround Waiting Response");
+    if (mode != COMPARISON) {
+        qsort(processes, count, sizeof *processes, compare_pid);
+        puts(mode == CSV ? "pid,arrival,completion,turnaround,waiting,response"
+                         : "PID Arrival Completion Turnaround Waiting Response");
+    }
     double turnaround = 0, waiting = 0, response = 0;
     for (size_t i = 0; i < count; i++) {
         const Process *p = &processes[i];
         long long elapsed = p->completion - p->arrival;
-        printf(csv ? "%s,%d,%lld,%lld,%lld,%lld\n" : "%s %d %lld %lld %lld %lld\n",
-               p->pid, p->arrival, p->completion, elapsed, p->waiting, p->response);
+        if (mode != COMPARISON) {
+            printf(mode == CSV ? "%s,%d,%lld,%lld,%lld,%lld\n" : "%s %d %lld %lld %lld %lld\n",
+                   p->pid, p->arrival, p->completion, elapsed, p->waiting, p->response);
+        }
         turnaround += (double)elapsed;
         waiting += (double)p->waiting;
         response += (double)p->response;
     }
-    if (!csv) {
+    double utilization = 100.0 * busy / now;
+    double throughput = 100.0 * count / now;
+    turnaround /= count;
+    waiting /= count;
+    response /= count;
+    if (mode == COMPARISON) {
+        printf("%s %.2f %.2f %.2f %.2f %.2f %lld\n", policy_names[policy],
+               turnaround, waiting, response, utilization, throughput, switches);
+    } else if (mode == NORMAL) {
         printf("Average turnaround: %.2f\nAverage waiting: %.2f\nAverage response: %.2f\n",
-               turnaround / count, waiting / count, response / count);
-        printf("CPU utilization: %.2f%%\n", 100.0 * busy / now);
-        printf("Throughput (processes per 100 ticks): %.2f\n", 100.0 * count / now);
+               turnaround, waiting, response);
+        printf("CPU utilization: %.2f%%\n", utilization);
+        printf("Throughput (processes per 100 ticks): %.2f\n", throughput);
         printf("Context switches: %lld\n", switches);
     }
 }
@@ -331,13 +345,25 @@ int main(int argc, char *argv[])
     int aging = 0;
     int quantum = 0;
     int switch_cost = -1;
-    if (argc < 5 || strcmp(argv[1], "sched") != 0 || strcmp(argv[2], "-a") != 0 ||
-        (strcmp(argv[3], "fcfs") && strcmp(argv[3], "sjf") &&
-         strcmp(argv[3], "srtf") && strcmp(argv[3], "prio") && strcmp(argv[3], "rr"))) {
-        fprintf(stderr, "Usage: ./minios sched -a POLICY [-q QUANTUM] [-c COST] [--aging N] [--trace] [--csv] FILE\n");
+    int compare = argc >= 4 && strcmp(argv[2], "--compare") == 0;
+    Policy policy = POLICY_COUNT;
+    if (!compare && argc >= 5 && strcmp(argv[2], "-a") == 0) {
+        for (int i = 0; i < POLICY_COUNT; i++) {
+            if (strcmp(argv[3], policy_names[i]) == 0) {
+                policy = (Policy)i;
+                break;
+            }
+        }
+    }
+    if (argc < 4 || strcmp(argv[1], "sched") != 0 || (!compare && policy == POLICY_COUNT)) {
+        fprintf(stderr, "Usage: ./minios sched (-a POLICY [OPTIONS] | --compare [-q QUANTUM]) FILE\n");
         return 1;
     }
-    for (int i = 4; i < argc - 1; i++) {
+    for (int i = compare ? 3 : 4; i < argc - 1; i++) {
+        if (compare && strcmp(argv[i], "-q") != 0) {
+            fprintf(stderr, "Invalid comparison option\n");
+            return 1;
+        }
         if (strcmp(argv[i], "--csv") == 0 && !csv) {
             csv = 1;
         } else if (strcmp(argv[i], "-c") == 0 && switch_cost < 0 &&
@@ -346,11 +372,11 @@ int main(int argc, char *argv[])
         } else if (strcmp(argv[i], "--trace") == 0 && !show_trace) {
             show_trace = 1;
         } else if (strcmp(argv[i], "-q") == 0 && !quantum &&
-                   strcmp(argv[3], "rr") == 0 && i + 1 < argc - 1 &&
+                   (compare || policy == RR) && i + 1 < argc - 1 &&
                    read_number(argv[i + 1], 1, &quantum)) {
             i++;
         } else if (strcmp(argv[i], "--aging") == 0 && !aging &&
-                   strcmp(argv[3], "prio") == 0 && i + 1 < argc - 1 &&
+                   policy == PRIO && i + 1 < argc - 1 &&
                    read_number(argv[i + 1], 1, &aging)) {
             i++;
         } else {
@@ -407,18 +433,20 @@ int main(int argc, char *argv[])
         goto cleanup;
     }
 
-    Policy policy = strcmp(argv[3], "sjf") == 0 ? SJF : FCFS;
-    if (strcmp(argv[3], "srtf") == 0) {
-        policy = SRTF;
-    } else if (strcmp(argv[3], "prio") == 0) {
-        policy = PRIO;
-    } else if (strcmp(argv[3], "rr") == 0) {
-        policy = RR;
+    if (!quantum) {
+        quantum = 4;
     }
-    if (show_trace && !csv) {
-        run_schedule(processes, count, 0, policy, aging, quantum ? quantum : 4, switch_cost, stdout);
+    if (compare) {
+        puts("Policy AvgTurnaround AvgWaiting AvgResponse CPU(%) Throughput/100ticks Switches");
+        for (int i = 0; i < POLICY_COUNT; i++) {
+            run_schedule(processes, count, COMPARISON, (Policy)i, 0, quantum, 0, NULL);
+        }
+    } else {
+        if (show_trace && !csv) {
+            run_schedule(processes, count, NORMAL, policy, aging, quantum, switch_cost, stdout);
+        }
+        run_schedule(processes, count, csv ? CSV : NORMAL, policy, aging, quantum, switch_cost, NULL);
     }
-    run_schedule(processes, count, csv, policy, aging, quantum ? quantum : 4, switch_cost, NULL);
     status = 0;
 
 cleanup:
