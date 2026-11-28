@@ -205,6 +205,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
     size_t finished = 0;
     const Process *previous = NULL;
     long long switches = 0;
+    long long busy = 0;
 
     for (size_t i = 0; i < count; i++) {
         processes[i].state = NEW;
@@ -271,6 +272,7 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         if (!csv && !trace) {
             printf("| %s %lld-%lld ", next->pid, now, end);
         }
+        busy += end - now;
         next->remaining -= (int)(end - now);
         now = end;
         admit_until(trace, processes, count, now);
@@ -294,24 +296,31 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         }
     }
 
-    if (!csv && !trace) {
-        puts("|");
-        if (switch_cost >= 0) {
-            printf("Context switches: %lld\n", switches);
-        }
-        return;
-    }
-
     if (trace) {
         return;
     }
+    if (!csv) {
+        puts("|");
+    }
     qsort(processes, count, sizeof *processes, compare_pid);
-    puts("pid,arrival,completion,turnaround,waiting,response");
+    puts(csv ? "pid,arrival,completion,turnaround,waiting,response"
+             : "PID Arrival Completion Turnaround Waiting Response");
+    double turnaround = 0, waiting = 0, response = 0;
     for (size_t i = 0; i < count; i++) {
         const Process *p = &processes[i];
-        printf("%s,%d,%lld,%lld,%lld,%lld\n",
-               p->pid, p->arrival, p->completion,
-               p->completion - p->arrival, p->waiting, p->response);
+        long long elapsed = p->completion - p->arrival;
+        printf(csv ? "%s,%d,%lld,%lld,%lld,%lld\n" : "%s %d %lld %lld %lld %lld\n",
+               p->pid, p->arrival, p->completion, elapsed, p->waiting, p->response);
+        turnaround += (double)elapsed;
+        waiting += (double)p->waiting;
+        response += (double)p->response;
+    }
+    if (!csv) {
+        printf("Average turnaround: %.2f\nAverage waiting: %.2f\nAverage response: %.2f\n",
+               turnaround / count, waiting / count, response / count);
+        printf("CPU utilization: %.2f%%\n", 100.0 * busy / now);
+        printf("Throughput (processes per 100 ticks): %.2f\n", 100.0 * count / now);
+        printf("Context switches: %lld\n", switches);
     }
 }
 

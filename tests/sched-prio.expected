@@ -1,1 +1,10 @@
 | P1 0-1 | P2 1-6 | P1 6-9 |
+PID Arrival Completion Turnaround Waiting Response
+P1 0 9 9 5 0
+P2 1 6 5 0 0
+Average turnaround: 7.00
+Average waiting: 2.50
+Average response: 0.00
+CPU utilization: 100.00%
+Throughput (processes per 100 ticks): 22.22
+Context switches: 2
