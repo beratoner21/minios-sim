@@ -5,7 +5,10 @@
 #include <stdlib.h>
 #include <string.h>
 
+typedef enum { NEW, READY, RUNNING, WAITING, TERMINATED } ProcessState;
+
 typedef struct {
+    ProcessState state;
     char pid[32];
     int arrival;
     int priority;
@@ -164,18 +167,55 @@ static long long preemption_end(const Process *processes, size_t count,
     return end;
 }
 
-static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging, int quantum)
+static void transition(FILE *trace, Process *p, ProcessState state, long long at)
+{
+    static const char *const names[] = {"NEW", "READY", "RUNNING", "WAITING", "TERMINATED"};
+    if (trace) {
+        fprintf(trace, "t=%lld %s %s -> %s\n", at, p->pid, names[p->state], names[state]);
+    }
+    p->state = state;
+}
+
+/* The scheduler jumps between CPU events. Report intervening arrivals and
+   I/O completions in timestamp order, with PID breaking simultaneous ties. */
+static void admit_until(FILE *trace, Process *processes, size_t count, long long until)
+{
+    for (;;) {
+        Process *first = NULL;
+        for (size_t i = 0; i < count; i++) {
+            Process *p = &processes[i];
+            if ((p->state != NEW && p->state != WAITING) || p->ready_at > until) {
+                continue;
+            }
+            if (!first || p->ready_at < first->ready_at ||
+                (p->ready_at == first->ready_at && strcmp(p->pid, first->pid) < 0)) {
+                first = p;
+            }
+        }
+        if (!first) {
+            return;
+        }
+        transition(trace, first, READY, first->ready_at);
+    }
+}
+
+static void run_schedule(Process *processes, size_t count, int csv, Policy policy, int aging, int quantum, FILE *trace)
 {
     long long now = 0;
     size_t finished = 0;
 
     for (size_t i = 0; i < count; i++) {
+        processes[i].state = NEW;
+        processes[i].current_burst = 0;
+        processes[i].waiting = 0;
+        processes[i].quantum_expired = 0;
         processes[i].ready_at = processes[i].arrival;
         processes[i].remaining = processes[i].bursts[0];
         processes[i].response = -1;
     }
 
     while (finished < count) {
+        admit_until(trace, processes, count, now);
         Process *next = NULL;
 
         for (size_t i = 0; i < count; i++) {
@@ -191,13 +231,14 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
 
         /* If even the earliest process is not ready yet, the CPU is idle. */
         if (now < next->ready_at) {
-            if (!csv) {
+            if (!csv && !trace) {
                 printf("| IDLE %lld-%lld ", now, next->ready_at);
             }
             now = next->ready_at;
             continue;
         }
 
+        transition(trace, next, RUNNING, now);
         next->quantum_expired = 0;
         next->waiting += now - next->ready_at;
         if (next->response < 0) {
@@ -211,21 +252,25 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         } else if (policy == SRTF || policy == PRIO) {
             end = preemption_end(processes, count, next, now, policy, aging);
         }
-        if (!csv) {
+        if (!csv && !trace) {
             printf("| %s %lld-%lld ", next->pid, now, end);
         }
         next->remaining -= (int)(end - now);
         now = end;
+        admit_until(trace, processes, count, now);
         if (next->remaining > 0) {
+            transition(trace, next, READY, now);
             next->ready_at = now;
             continue;
         }
         next->current_burst++;
 
         if (next->current_burst == next->burst_count) {
+            transition(trace, next, TERMINATED, now);
             next->completion = now;
             finished++;
         } else {
+            transition(trace, next, WAITING, now);
             int io_duration = next->bursts[next->current_burst];
             next->ready_at = now + io_duration;
             next->current_burst++;
@@ -233,11 +278,14 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
         }
     }
 
-    if (!csv) {
+    if (!csv && !trace) {
         puts("|");
         return;
     }
 
+    if (trace) {
+        return;
+    }
     qsort(processes, count, sizeof *processes, compare_pid);
     puts("pid,arrival,completion,turnaround,waiting,response");
     for (size_t i = 0; i < count; i++) {
@@ -251,17 +299,20 @@ static void run_schedule(Process *processes, size_t count, int csv, Policy polic
 int main(int argc, char *argv[])
 {
     int csv = 0;
+    int show_trace = 0;
     int aging = 0;
     int quantum = 0;
     if (argc < 5 || strcmp(argv[1], "sched") != 0 || strcmp(argv[2], "-a") != 0 ||
         (strcmp(argv[3], "fcfs") && strcmp(argv[3], "sjf") &&
          strcmp(argv[3], "srtf") && strcmp(argv[3], "prio") && strcmp(argv[3], "rr"))) {
-        fprintf(stderr, "Usage: ./minios sched -a POLICY [-q QUANTUM] [--aging N] [--csv] FILE\n");
+        fprintf(stderr, "Usage: ./minios sched -a POLICY [-q QUANTUM] [--aging N] [--trace] [--csv] FILE\n");
         return 1;
     }
     for (int i = 4; i < argc - 1; i++) {
         if (strcmp(argv[i], "--csv") == 0 && !csv) {
             csv = 1;
+        } else if (strcmp(argv[i], "--trace") == 0 && !show_trace) {
+            show_trace = 1;
         } else if (strcmp(argv[i], "-q") == 0 && !quantum &&
                    strcmp(argv[3], "rr") == 0 && i + 1 < argc - 1 &&
                    read_number(argv[i + 1], 1, &quantum)) {
@@ -332,7 +383,10 @@ int main(int argc, char *argv[])
     } else if (strcmp(argv[3], "rr") == 0) {
         policy = RR;
     }
-    run_schedule(processes, count, csv, policy, aging, quantum ? quantum : 4);
+    if (show_trace && !csv) {
+        run_schedule(processes, count, 0, policy, aging, quantum ? quantum : 4, stdout);
+    }
+    run_schedule(processes, count, csv, policy, aging, quantum ? quantum : 4, NULL);
     status = 0;
 
 cleanup:
